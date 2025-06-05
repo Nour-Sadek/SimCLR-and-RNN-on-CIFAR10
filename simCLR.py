@@ -237,7 +237,7 @@ class LinearClassifier(nn.Module):
 
 
 encoder = trained_resnet_model.get_encoder()
-model = LinearClassifier(encoder, 64, 10)
+model = LinearClassifier(encoder, 512, 10)
 model.to(device)
 optimizer = optim.Adam(model.classifier.parameters(), lr=1e-4)
 criterion = nn.CrossEntropyLoss()
@@ -309,3 +309,28 @@ plt.savefig("simCLR.png", dpi=300, bbox_inches="tight")
 # Save the trained model
 path = "./simCLR.pth"
 torch.save(model.state_dict(), path)
+
+# Checking the accuracy of a prediction for each class
+classes = ["plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
+
+# prepare to count predictions for each class
+correct_pred = {class_name: 0 for class_name in classes}
+total_pred = {class_name: 0 for class_name in classes}
+
+with torch.no_grad():
+    model.eval()
+    for images, labels in test_loader:
+        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)
+        _, predictions = torch.max(outputs, 1)
+        # collect the correct predictions for each class
+        for label, prediction in zip(labels, predictions):
+            if label == prediction:
+                correct_pred[classes[label]] += 1
+            total_pred[classes[label]] += 1
+
+
+# print accuracy for each class
+for class_name, correct_count in correct_pred.items():
+    accuracy = 100 * float(correct_count) / total_pred[class_name]
+    print(f"Accuracy for class: {class_name:5s} is {accuracy:.1f} %")
