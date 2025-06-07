@@ -105,3 +105,176 @@ is used. Since it is similar to an LSTm but more computationally efficient, I wo
 
 As expected, even though it lead to improvement in validation loss, the changes in training and validation accuracy followed 
 the same pattern as when as LSTM was used.
+
+# Training on the CIFAR-10 dataset using simCLR
+
+Using simCLR involves applying a couple of augmentations on the input images, then running the augmented views through an 
+encoder, in this case it is the ResNet18 model, and a non-linear Multi-Layer Perceptron (MLP) projection head to finally 
+get evaluated by the NT-Xent Contrastive Loss Function. Due to limitations in computational resources, I opted to use 
+ResNet18 instead of a bigger model like ResNet50 and arbitrarily chosen hyperparameters, and so the whole training data set 
+was used rather than splitting it into training and validation, and the test set was used as the validation set instead. 
+Nowhere in this implementation was the test set used to optimize the model.
+
+### Choosing the transformations for the data augmentations
+
+The paper tested a bunch of transformations and saw that doing random cropping of the images and strong color distortions 
+gave the best results. Following what the paper outlines in its Appendix/Supplemental, these are types of augmentations 
+that were performed on the input images:
+
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(32),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=train_mean_std[0], std=train_mean_std[1])])
+
+It needs to be mentioned that the types of data augmentations to would be effective would be highly dependent on the types 
+of images being used. I used the same types of augmentations due to the assumed similarities between the CIFAR-10 and 
+ImageNet images, however it might not be intuitively sound to try these same augmentations on different types of images, 
+for example like medical or microscopy images, so different types of augmentations would need to be sampled.
+
+### Implementation of the NT-Xent Loss Function
+
+The NT-Xent loss function was implemented as outlined in the paper, where the output of the MLP __metric_embeddings__ 
+is evaluated by this loss function scaled with the hyperparameter __temperature__. After defining the normalized and 
+temperature scaled cosine similarity between the positive pairs in the numerator and all pairs, positive and negative, 
+in the denominator, this fraction is fed through the Cross Entropy Loss function to output Normalized Temperature-Scaled 
+Cross Entropy Loss (NT-Xent).
+
+    def nt_xent_loss(metric_embeddings, temperature):
+        double_batch_size = metric_embeddings.size(0)
+        metric_embeddings = F.normalize(metric_embeddings, dim=1)
+
+        # Create the numerator (cosine similarity between the sample and its positive)
+        positives = torch.sum(metric_embeddings[:double_batch_size // 2] * metric_embeddings[double_batch_size // 2:],
+                             dim=1) / temperature
+        positives = torch.cat([positives, positives])  # for symmetry
+
+        # Create the denominator (cosine similarity between the sample and its negatives and its positive)
+        all_distances = torch.matmul(metric_embeddings, metric_embeddings.T) / temperature
+        # Remove the cosine similarity between a sample and its self
+        mask_self = ~torch.eye(double_batch_size, dtype=bool,
+                               device=metric_embeddings.device)  # make an identity matrix that excludes the diagonal
+        all_distances = all_distances[mask_self].view(double_batch_size, -1)  # remove the diagonal values, now it is of
+                                                                              # size (double_batch_size, double_batch_size - 1)
+
+        # Create the logits and labels as input for the cross_entropy function
+        logits = torch.cat([positives.unsqueeze(1), all_distances], dim=1)
+        labels = torch.zeros(double_batch_size, dtype=torch.long,
+                             device=metric_embeddings.device)  # the first column (class 0) is where the positives are
+        return F.cross_entropy(logits, labels)
+
+### The Architecture of the simCLR model
+
+The paper tested using no projection head as in the identity (as in feeding the output of the encoder to the Contrastive Loss function), 
+a linear projection, or a non-linear projection, and saw that using a non-linear projection before evaluating with the loss 
+function gave the best results. And so, a simple non-linear MLP was used with ReLU as the activation function. I also provide 
+the opportunity to return the encoder only from the model, which will be beneficial later for dimensionality reduction analysis 
+and applying a linear classifier.
+
+    class simCLRModel(nn.Module):
+        def __init__(self, encoder, encoder_out_features_num, l2, l3):
+            super().__init__()
+            # Define the encoder
+            self.encoder = encoder
+            # Define the projection head
+            self.projection_head = nn.Sequential(
+                nn.Linear(encoder_out_features_num, l2),
+                nn.BatchNorm1d(l2),
+                nn.ReLU(),
+                nn.Linear(l2, l3)
+            )
+
+        def forward(self, x):
+            encoder_representations = self.encoder(x)
+            metric_embeddings = self.projection_head(encoder_representations)
+            return metric_embeddings  # shape: (2 * batch_size, l3)
+
+        def get_encoder(self):
+            return self.encoder
+
+### The Architecture of the Linear Classifier
+
+After simCLR has trained the model to learn the representations, a simple linear classifier could be used to see how well 
+these representations allow for the correct predictions of classifications. However, the paper showed that using the 
+representations before the projection head (as in, the output representations from the encoder) gives better results, and so 
+this simple linear classifier would accept the encoder (ResNet18 model) from simCLRModel as input.
+
+    class LinearClassifier(nn.Module):
+        def __init__(self, encoder, features_num, num_classes):
+            super().__init__()
+            self.encoder = encoder.get_encoder()
+            self.classifier = nn.Linear(features_num, num_classes)
+
+        def forward(self, x):
+            with torch.no_grad():
+                simCLR_features = self.encoder(x)
+            return self.classifier(simCLR_features)
+
+There are two ways this linear classifier could have been trained:
+- Freeze the encoder and just train the linear classifier
+- Fine-tune the encoder and allow its weights to be updated as well during the linear classification task.
+
+For this task, I only opted for the first method to see how well applying simCLR on its own was able to create good 
+representations and so, I specified that only the parameters of the classifier to be optimized. However, I hypothesize 
+that trying to fine-tune the encoder during the linear classification task would give better classification results.
+
+### Dimensionality Reduction Analysis
+
+After representations of the training data were learned from simCLR and before running the linear classifier, the 
+representations of the encoder were visualized using a t-SNE plot to see how well the model separated the test images 
+based on their classifications.
+
+### Results
+
+The paper saw that using large batch sizes and training for longer epochs would lead to better representation learning, and 
+or the CIFAR-10 dataset specifically, they used a batch size of 1024 and a temperature value of 0.5 and ran it for as 
+many as 1000 epochs. Due to computational constraints, I only ran the simCLR model for 300 epochs with the same temperature 
+value but an arbitrarily chosen learning rate and arbitrarily chosen sizes of the MLP layers.
+
+This is how the loss of the training data set changed throughout training for 300 epochs.
+
+![Image](https://github.com/user-attachments/assets/ac5233de-cb16-4226-a702-2ae83dbb48fa)
+
+It seems like the model didn't converge and could have benefited from longer training time, and of course, resources 
+permitting, might have given better results with optimized values for the learning rate and layers of the MLP.
+
+After training, a linear classifier was trained on top of a frozen encoder to see how well the model learned the 
+representations that would allow for a good classification prediction. Again, arbitrarily chosen learning rate was used.
+
+This is how the loss and accuracy of the train and validation (test) data sets changed throughout training of the 
+classifier for 100 epochs.
+
+![Image](https://github.com/user-attachments/assets/a6bfb3f9-98d3-4ec3-b167-11d6f9f2c63f)
+
+The model achieved a maximum validation accuracy of 73% which isn't that different from the training accuracy of about 
+76% and the loss values of both the training and validation are pretty close to each other as well, so the model was able 
+to successfully learn generalizable representations enough to prevent over-fitting of the data, but definitely as is 
+indicated by the low training set accuracy, the model would benefit from better performance.
+
+I also visualized the distribution of the learned representations using a t-SNE plot.
+
+![Image](https://github.com/user-attachments/assets/5c24ccbb-e6ff-4deb-b325-7fce4c1e92f5)
+
+It seems like the classes that belong to vehicles (car, truck, ship, plane) as well as the horse, deer and frog classes 
+to some extent formed obvious clusters, however the remaining three classes dog, cat, and bird don't seem properly separated.
+
+From this t-SNE plot, I expect that the accuracy of predictions for the dog, cat, and bird classes should be the lowest 
+while the accuracy for the other classes which form obvious clusters and so the model has learned their representation 
+relatively well should be comparatively much higher. To test this, rather than looking at the accuracy of the whole test 
+dataset, I looked at the accuracy per class. This was the output, and indeed the accuracy of predictions for those three 
+classes were the lowest, while the predictions for the vehicle classes were the highest.
+
+    Accuracy for class: plane is 75.1 %
+    Accuracy for class: car   is 82.8 %
+    Accuracy for class: bird  is 59.1 %
+    Accuracy for class: cat   is 47.0 %
+    Accuracy for class: deer  is 66.3 %
+    Accuracy for class: dog   is 61.4 %
+    Accuracy for class: frog  is 75.3 %
+    Accuracy for class: horse is 70.4 %
+    Accuracy for class: ship  is 76.8 %
+    Accuracy for class: truck is 77.5 %
+

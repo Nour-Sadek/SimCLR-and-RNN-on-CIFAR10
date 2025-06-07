@@ -17,7 +17,7 @@ from functions import nt_xent_loss
 
 # Hyperparameters
 batch_size = 1024
-num_epochs = 500
+num_epochs = 300
 
 # Variables
 train_mean_std = (torch.tensor([0.4913, 0.4820, 0.4461]), torch.tensor([0.2024, 0.1994, 0.2008]))
