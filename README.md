@@ -278,3 +278,33 @@ classes were the lowest, while the predictions for the vehicle classes were the 
     Accuracy for class: ship  is 76.8 %
     Accuracy for class: truck is 77.5 %
 
+### Possible Improvements
+
+Multiple improvements could have been implemented to lead to better learned representations using this self-supervised 
+contrastive loss method. Simple improvements include using a better performing encoder, such as ResNet50 instead of ResNet18, 
+performing hyperparameter tuning for the MLP layer sizes, learning rate and its decay schedule, L2 regularization, and temperature, 
+among others, as well as training for longer epochs and with larger batch sizes.
+
+Also, during training of the linear classifier, the encoder could have also been fine-tuned alongside it rather just being 
+frozen. Also, sampling different data augmentations could have been worthwhile, specifically looking at those augmentations 
+that would induce appreciable changes to those images that the model failed to learn discernible features for like the images 
+that belong to the dog, cat, and bird classes, which would require manual inspection of the training data.
+
+# Repository Structure
+
+This repository contains:
+
+    rnn_hyperparameter_tune.py: Performing hyperparameter tuning using pytorch-lightning and Optuna to optimize the original 
+    RNN model in rnn.py.
+
+    rnn.py: Implementation of a Recurrent Neural Network where the loss and accuracy of the train and validation sets during 
+    training are plotted.
+
+    simCLR.py: Implementation of the simCLR algorithm, a simple framework for contrastive learning as well as performing 
+    Dimensionality Reduction Analysis by plotting a t-SNE plot.
+
+    functions.py: Three helper functions that are used across the python scripts.
+
+    requirements.txt: List of required Python packages.
+
+Python 3.12 version was used
